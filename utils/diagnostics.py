@@ -31,27 +31,49 @@ def check_contact_ratio(dataset_dir: str, threshold: float = 0.5) -> float:
 
 
 # ------------------------------------------------------------------
-# Force-vs-time plot (sample of episodes)
+# Force-vs-time plot (all episodes, 2-column grid)
 # ------------------------------------------------------------------
 
 def plot_force_vs_time(
     dataset_dir: str,
     output_dir: str,
-    n_episodes: int = 5,
+    n_episodes: int | None = None,
 ) -> None:
+    """Plot force components + magnitude for every episode in a 2-column grid.
+
+    Pass n_episodes=None (default) to include all episodes found on disk.
+    Pass an integer to cap at that many (evenly sampled).
+    """
     os.makedirs(output_dir, exist_ok=True)
     ep_dirs = sorted(glob.glob(os.path.join(dataset_dir, "episode_*")))
     if not ep_dirs:
         return
 
-    indices = np.linspace(0, len(ep_dirs) - 1, min(n_episodes, len(ep_dirs)),
-                          dtype=int)
+    if n_episodes is None:
+        indices = list(range(len(ep_dirs)))
+    else:
+        indices = list(
+            np.linspace(0, len(ep_dirs) - 1, min(n_episodes, len(ep_dirs)),
+                        dtype=int)
+        )
 
-    fig, axes = plt.subplots(len(indices), 1,
-                             figsize=(8, 2.5 * len(indices)),
-                             squeeze=False)
+    n_cols = 2
+    n_rows = (len(indices) + n_cols - 1) // n_cols
 
-    for row, idx in enumerate(indices):
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(12, 3.0 * n_rows),
+        squeeze=False,
+    )
+
+    component_styles = [
+        ("Fx", "tab:blue",   0),
+        ("Fy", "tab:orange", 1),
+        ("Fz", "tab:green",  2),
+    ]
+
+    for plot_pos, idx in enumerate(indices):
+        row, col = divmod(plot_pos, n_cols)
         ep_dir = ep_dirs[idx]
         force = np.load(os.path.join(ep_dir, "force.npy"))
         mag = np.linalg.norm(force[:, :3], axis=1)
@@ -59,19 +81,65 @@ def plot_force_vs_time(
         with open(os.path.join(ep_dir, "metadata.json")) as f:
             meta = json.load(f)
 
-        ax = axes[row, 0]
-        ax.plot(mag, linewidth=1.0)
-        ax.set_ylabel("|F| (N)")
-        label = "success" if meta.get("success") else "fail"
-        ax.set_title(f"Episode {meta.get('episode_id', idx)}  [{label}]",
-                     fontsize=9)
-        ax.grid(True, alpha=0.3)
+        ax = axes[row, col]
+        success = bool(meta.get("success"))
+        is_hard = bool(meta.get("is_hard", False))
+        ep_id = meta.get("episode_id", idx)
+        peg_off = meta.get("peg_offset", [0.0, 0.0])
+        off_mm = [round(v * 1000, 1) for v in peg_off]
 
-    axes[-1, 0].set_xlabel("Timestep")
+        # Subtle background tint: red for fail, green for success
+        bg_color = "#fff0f0" if not success else "#f0fff0"
+        ax.set_facecolor(bg_color)
+
+        # Plot per-component forces as thin lines
+        for label, color, ci in component_styles:
+            ax.plot(force[:, ci], linewidth=0.8, color=color,
+                    alpha=0.6, label=label)
+
+        # Plot magnitude as a bold black line
+        ax.plot(mag, linewidth=1.4, color="black", label="|F|")
+
+        ax.set_ylabel("|F| (N)", fontsize=7)
+        ax.tick_params(labelsize=7)
+        ax.grid(True, alpha=0.25)
+
+        outcome = "SUCCESS" if success else "FAIL"
+        difficulty = "HARD" if is_hard else "easy"
+        ax.set_title(
+            f"Ep {ep_id}  [{outcome}]  {difficulty}  "
+            f"offset=({off_mm[0]},{off_mm[1]}) mm",
+            fontsize=8,
+            color="darkred" if not success else "darkgreen",
+        )
+
+        if plot_pos == 0:
+            ax.legend(fontsize=6, loc="upper right", ncol=4)
+
+    # Hide unused subplots; label x-axis on the last filled subplot in each column
+    for plot_pos in range(len(indices), n_rows * n_cols):
+        row, col = divmod(plot_pos, n_cols)
+        axes[row, col].set_visible(False)
+
+    for col in range(n_cols):
+        # Find the last row in this column that has a plot
+        filled_rows = [
+            plot_pos // n_cols
+            for plot_pos in range(col, len(indices), n_cols)
+        ]
+        if filled_rows:
+            axes[filled_rows[-1], col].set_xlabel("Timestep", fontsize=7)
+
+    fig.suptitle(
+        "Force vs Time — All Episodes  (red bg = fail, green bg = success)",
+        fontsize=10,
+        y=1.01,
+    )
     fig.tight_layout()
-    fig.savefig(os.path.join(output_dir, "force_vs_time.png"), dpi=120)
+    fig.savefig(os.path.join(output_dir, "force_vs_time.png"),
+                dpi=130, bbox_inches="tight")
     plt.close(fig)
-    print(f"  Saved force_vs_time.png")
+    print(f"  Saved force_vs_time.png  ({len(indices)} episodes)")
 
 
 # ------------------------------------------------------------------
@@ -144,7 +212,7 @@ def run_all(dataset_dir: str, diagnostics_dir: str,
             threshold: float = 0.5) -> None:
     print("\n--- Diagnostics ---")
     check_contact_ratio(dataset_dir, threshold)
-    plot_force_vs_time(dataset_dir, diagnostics_dir)
+    plot_force_vs_time(dataset_dir, diagnostics_dir, n_episodes=None)
     plot_force_histogram(dataset_dir, diagnostics_dir)
     print_summary(dataset_dir)
     print(f"Plots saved to {diagnostics_dir}\n")

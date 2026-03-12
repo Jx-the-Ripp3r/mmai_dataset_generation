@@ -119,4 +119,4 @@ class DatasetConfig:
 
     @classmethod
     def debug(cls) -> "DatasetConfig":
-        return cls(num_clean=15, num_noisy=5, max_steps=80)
+        return cls(num_clean=30, num_noisy=10, max_steps=80)
