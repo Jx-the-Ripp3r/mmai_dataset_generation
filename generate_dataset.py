@@ -1,0 +1,166 @@
+"""Generate the peg-in-hole dataset.
+
+Usage
+-----
+Full dataset (1500 episodes):
+    python generate_dataset.py
+
+Debug run (20 episodes, 50 steps, diagnostics):
+    python generate_dataset.py --debug
+
+With GUI visualisation:
+    python generate_dataset.py --debug --gui
+"""
+
+import argparse
+import os
+import sys
+import time
+
+import numpy as np
+from tqdm import tqdm
+
+from config import DatasetConfig
+from setup_assets import setup_all
+from sim.environment import PegInsertionEnv
+from sim.controller import SimpleDownwardController
+from sim.noise import (
+    randomize_lighting,
+    apply_image_noise,
+    apply_force_noise,
+    apply_joint_noise,
+)
+from utils.data_io import save_episode
+from utils.diagnostics import run_all as run_diagnostics
+
+
+def ensure_assets(cfg: DatasetConfig) -> None:
+    """Generate URDF assets if they don't exist yet."""
+    if not os.path.isfile(cfg.robot_urdf):
+        setup_all(cfg)
+
+
+def run_episode(
+    env: PegInsertionEnv,
+    controller: SimpleDownwardController,
+    cfg: DatasetConfig,
+    is_noisy: bool,
+) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, bool]:
+    """Execute one episode and return (rgb_frames, proprio, force, success)."""
+    rgb_frames: list[np.ndarray] = []
+    proprio = np.zeros((cfg.max_steps, cfg.num_joints * 2), dtype=np.float64)
+    force = np.zeros((cfg.max_steps, 6), dtype=np.float64)
+
+    success = False
+    for step in range(cfg.max_steps):
+        controller.step()
+        env.step_simulation()
+
+        # proprioception
+        jpos, jvel = env.get_joint_state()
+        if is_noisy:
+            jpos, jvel = apply_joint_noise(jpos, jvel, cfg)
+        proprio[step] = np.concatenate([jpos, jvel])
+
+        # force / torque
+        ft = env.get_contact_force_torque()
+        if is_noisy:
+            ft = apply_force_noise(ft, cfg)
+        force[step] = ft
+
+        # RGB (every N steps)
+        if step % cfg.save_rgb_every == 0:
+            rgb = env.get_rgb()
+            if is_noisy:
+                rgb = apply_image_noise(rgb, cfg)
+            rgb_frames.append(rgb)
+
+        if not success:
+            success = env.check_success()
+
+    return rgb_frames, proprio, force, success
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Peg-in-hole dataset generation")
+    parser.add_argument("--debug", action="store_true",
+                        help="Quick run: 20 episodes, 50 steps, with diagnostics")
+    parser.add_argument("--gui", action="store_true",
+                        help="Launch PyBullet GUI (slow, useful for visual check)")
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
+    np.random.seed(args.seed)
+    cfg = DatasetConfig.debug() if args.debug else DatasetConfig()
+
+    ensure_assets(cfg)
+
+    env = PegInsertionEnv(cfg, gui=args.gui)
+    # store num_joints on config so run_episode can reference it
+    cfg.num_joints = env.num_joints
+    controller = SimpleDownwardController(env)
+
+    os.makedirs(cfg.dataset_dir, exist_ok=True)
+
+    total = cfg.total_episodes
+    t0 = time.time()
+
+    for episode_id in tqdm(range(total), desc="episodes", file=sys.stdout):
+        is_noisy = episode_id >= cfg.num_clean
+        is_hard = np.random.random() < cfg.hard_episode_fraction
+
+        # --- sample randomisation parameters ---
+        xy_range = cfg.peg_xy_offset_range_hard if is_hard else cfg.peg_xy_offset_range
+        rot_range = cfg.peg_rotation_range_deg_hard if is_hard else cfg.peg_rotation_range_deg
+
+        peg_offset = np.random.uniform(-xy_range, xy_range, 2)
+        peg_rotation = np.random.uniform(-rot_range, rot_range, 2)
+        hole_offset = np.random.uniform(-cfg.hole_xy_offset_range,
+                                         cfg.hole_xy_offset_range, 2)
+        target_depth = np.random.uniform(*cfg.target_depth_range)
+
+        # --- reset & optionally randomise lighting ---
+        env.reset(peg_offset, peg_rotation, hole_offset, target_depth)
+        controller.reset(env.get_ee_pos())
+        if is_noisy:
+            randomize_lighting(env.physics_client, cfg)
+
+        # --- run episode ---
+        rgb_frames, proprio, force_data, success = run_episode(
+            env, controller, cfg, is_noisy
+        )
+
+        # --- compute per-episode stats ---
+        force_mag = np.linalg.norm(force_data[:, :3], axis=1)
+        contact_ratio = float(np.mean(force_mag > cfg.contact_force_threshold))
+        max_force = float(np.max(force_mag))
+
+        metadata = {
+            "episode_id": episode_id,
+            "peg_offset": peg_offset.tolist(),
+            "peg_rotation": peg_rotation.tolist(),
+            "hole_offset": hole_offset.tolist(),
+            "target_depth": float(target_depth),
+            "is_noisy": is_noisy,
+            "is_hard": is_hard,
+            "success": int(success),
+            "max_contact_force": max_force,
+            "contact_ratio": contact_ratio,
+        }
+
+        save_episode(cfg.dataset_dir, episode_id, rgb_frames,
+                     proprio, force_data, metadata)
+
+    elapsed = time.time() - t0
+    print(f"\nGenerated {total} episodes in {elapsed:.1f}s "
+          f"({elapsed/total:.2f}s / ep)")
+
+    env.close()
+
+    if args.debug:
+        run_diagnostics(cfg.dataset_dir, cfg.diagnostics_dir,
+                        cfg.contact_force_threshold)
+
+
+if __name__ == "__main__":
+    main()

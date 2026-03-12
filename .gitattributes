@@ -1,0 +1,26 @@
+# Treat Python files as text, normalize to LF in repo
+*.py text eol=lf
+
+# Treat shell scripts as text
+*.sh text eol=lf
+
+# Treat config or other text files as text
+*.txt text eol=lf
+*.cfg text eol=lf
+*.ini text eol=lf
+
+# Treat binary files as binary (do NOT touch line endings)
+*.obj binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.zip binary
+*.tar binary
+*.pth binary
+*.npy binary
+*.pkl binary
+
+# Explicitly treat .gitattributes and .gitignore as text with LF
+.gitattributes text eol=lf
+.gitignore text eol=lf

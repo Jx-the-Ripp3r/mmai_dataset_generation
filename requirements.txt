@@ -1,0 +1,7 @@
+pybullet
+numpy
+opencv-python
+trimesh
+manifold3d
+matplotlib
+tqdm
