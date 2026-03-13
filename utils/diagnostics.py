@@ -86,7 +86,14 @@ def plot_force_vs_time(
         is_hard = bool(meta.get("is_hard", False))
         ep_id = meta.get("episode_id", idx)
         peg_off = meta.get("peg_offset", [0.0, 0.0])
+        peg_rot = meta.get("peg_rotation", [0.0, 0.0])
         off_mm = [round(v * 1000, 1) for v in peg_off]
+        rot_deg = [round(v, 1) for v in peg_rot]
+
+        end_depth_mm = meta.get("end_depth_m")
+        required_depth_mm = meta.get("required_depth_m")
+        deficit_mm = meta.get("depth_deficit_m")
+        end_xy_dist_mm = meta.get("end_xy_dist_m")
 
         # Subtle background tint: red for fail, green for success
         bg_color = "#fff0f0" if not success else "#f0fff0"
@@ -106,10 +113,31 @@ def plot_force_vs_time(
 
         outcome = "SUCCESS" if success else "FAIL"
         difficulty = "HARD" if is_hard else "easy"
-        ax.set_title(
+
+        # Build depth + XY string (only present in episodes generated after this change)
+        if end_depth_mm is not None and required_depth_mm is not None:
+            depth_ok = (deficit_mm is not None and deficit_mm <= 0)
+            xy_ok = (end_xy_dist_mm is not None and end_xy_dist_mm < 0.005)
+            depth_tag = "✓" if depth_ok else "✗"
+            xy_tag = "✓" if xy_ok else "✗"
+            xy_str = f"{end_xy_dist_mm*1000:.1f}mm" if end_xy_dist_mm is not None else "n/a"
+            end_str = (
+                f"depth{depth_tag} end={end_depth_mm*1000:.1f} req={required_depth_mm*1000:.1f}mm"
+                f"  |  xy{xy_tag} tip_xy={xy_str} (tol=5mm)"
+            )
+        else:
+            end_str = ""
+
+        title_line1 = (
             f"Ep {ep_id}  [{outcome}]  {difficulty}  "
-            f"offset=({off_mm[0]},{off_mm[1]}) mm",
-            fontsize=8,
+            f"xy=({off_mm[0]},{off_mm[1]})mm  rot=({rot_deg[0]},{rot_deg[1]})°"
+        )
+        title_line2 = end_str
+        full_title = title_line1 if not title_line2 else f"{title_line1}\n{title_line2}"
+
+        ax.set_title(
+            full_title,
+            fontsize=7,
             color="darkred" if not success else "darkgreen",
         )
 

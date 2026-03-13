@@ -135,12 +135,33 @@ def main() -> None:
         contact_ratio = float(np.mean(force_mag > cfg.contact_force_threshold))
         max_force = float(np.max(force_mag))
 
+        # --- compute final insertion depth and tip XY error ---
+        final_peg_tip = env.get_peg_tip_pos()
+        final_peg_tip_z = float(final_peg_tip[2])
+        bore_bottom_z = cfg.table_height + cfg.hole_bottom_thickness
+        # Positive = inside the bore; 0 = at bore opening; ~30 mm = at bore floor
+        end_depth_m = float(cfg.bore_opening_z - final_peg_tip_z)
+        # Minimum depth required for the success check (bore_opening - target_z)
+        required_depth_m = float(
+            cfg.bore_opening_z
+            - (bore_bottom_z + (1.0 - cfg.success_depth_fraction) * target_depth)
+        )
+        # Positive deficit = peg fell short of success threshold
+        depth_deficit_m = float(required_depth_m - end_depth_m)
+        # XY distance of peg tip from hole centre at episode end (success needs < 5 mm)
+        hole_xy = env.hole_world_pos[:2]
+        end_xy_dist_m = float(np.linalg.norm(final_peg_tip[:2] - hole_xy))
+
         metadata = {
             "episode_id": episode_id,
             "peg_offset": peg_offset.tolist(),
             "peg_rotation": peg_rotation.tolist(),
             "hole_offset": hole_offset.tolist(),
             "target_depth": float(target_depth),
+            "end_depth_m": end_depth_m,
+            "required_depth_m": required_depth_m,
+            "depth_deficit_m": depth_deficit_m,
+            "end_xy_dist_m": end_xy_dist_m,
             "is_noisy": is_noisy,
             "is_hard": is_hard,
             "success": int(success),
