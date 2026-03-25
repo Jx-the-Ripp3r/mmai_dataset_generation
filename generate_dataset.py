@@ -52,6 +52,21 @@ def run_episode(
     force = np.zeros((cfg.max_steps, 6), dtype=np.float64)
 
     success = False
+    bore_bottom_z = cfg.table_height + cfg.hole_bottom_thickness
+    target_depth = getattr(env, "target_depth", 0.02)
+    required_depth_m = float(
+        cfg.bore_opening_z
+        - (bore_bottom_z + (1.0 - cfg.success_depth_fraction) * target_depth)
+    )
+    lateral_high_steps = 0
+    n_consecutive = getattr(
+        cfg, "angular_jam_consecutive_steps", 12
+    )
+    lat_threshold = getattr(
+        cfg, "angular_jam_lateral_force_threshold", 5.0
+    )
+    use_early_stop = getattr(cfg, "angular_jam_early_stop", True)
+
     for step in range(cfg.max_steps):
         controller.step()
         env.step_simulation()
@@ -77,6 +92,27 @@ def run_episode(
 
         if not success:
             success = env.check_success()
+
+        # Early stop: peg at intermediate depth + sustained high lateral force → angular jam
+        if use_early_stop and not success:
+            peg_tip_z = float(env.get_peg_tip_pos()[2])
+            end_depth_m = float(cfg.bore_opening_z - peg_tip_z)
+            lateral_mag = float(np.linalg.norm(ft[:2]))
+            if 0.005 < end_depth_m < required_depth_m - 0.001:
+                if lateral_mag > lat_threshold:
+                    lateral_high_steps += 1
+                    if lateral_high_steps >= n_consecutive:
+                        # Truncate to this step and return as failure (angular jam)
+                        return (
+                            rgb_frames,
+                            proprio[: step + 1].copy(),
+                            force[: step + 1].copy(),
+                            False,
+                        )
+                else:
+                    lateral_high_steps = 0
+            else:
+                lateral_high_steps = 0
 
     return rgb_frames, proprio, force, success
 
@@ -129,6 +165,13 @@ def main() -> None:
         rgb_frames, proprio, force_data, success = run_episode(
             env, controller, cfg, is_noisy
         )
+        num_steps = force_data.shape[0]
+        # Early stop with peg at intermediate depth → synthetic angular jam
+        angular_jam = (
+            getattr(cfg, "angular_jam_early_stop", False)
+            and not success
+            and num_steps < cfg.max_steps
+        )
 
         # --- compute per-episode stats ---
         force_mag = np.linalg.norm(force_data[:, :3], axis=1)
@@ -165,6 +208,7 @@ def main() -> None:
             "is_noisy": is_noisy,
             "is_hard": is_hard,
             "success": int(success),
+            "angular_jam": angular_jam,
             "max_contact_force": max_force,
             "contact_ratio": contact_ratio,
         }

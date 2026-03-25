@@ -11,7 +11,10 @@ class DatasetConfig:
     peg_radius: float = 0.005
     peg_length: float = 0.080
     peg_mass: float = 0.05
-    hole_radius: float = 0.012
+    # Tighter bore + higher friction give true angular jams (peg wedges, whole
+    # assembly stops). 8 mm keeps rim + success mix; try 7 mm or μ≈0.55 if you
+    # want more mid-insertion jams (may reduce success rate).
+    hole_radius: float = 0.008
     hole_block_size: float = 0.060
     hole_depth: float = 0.030
     hole_bottom_thickness: float = 0.005
@@ -63,6 +66,13 @@ class DatasetConfig:
     # ---- Contact detection ----
     contact_force_threshold: float = 0.5
 
+    # ---- Angular-jam early stop (synthetic mid-insertion jams) ----
+    # When peg is at intermediate depth and lateral force is high for N steps,
+    # stop the episode early so we get a distinct force profile (stall).
+    angular_jam_early_stop: bool = True
+    angular_jam_lateral_force_threshold: float = 5.0  # N (Fx,Fy magnitude)
+    angular_jam_consecutive_steps: int = 12
+
     # ---- Noise (noisy episodes only) ----
     image_noise_sigma_range: Tuple[float, float] = (5.0, 25.0)
     force_noise_sigma: float = 0.2
@@ -72,7 +82,9 @@ class DatasetConfig:
     light_color_jitter: float = 0.20
 
     # ---- Friction / dynamics ----
-    lateral_friction: float = 0.2
+    # Higher friction allows wedge jams when peg contacts bore wall; ~0.45–0.55
+    # balances jams vs successes and rim-contact failures.
+    lateral_friction: float = 0.50
     restitution: float = 0.1
 
     # ---- Derived paths ----
@@ -86,6 +98,9 @@ class DatasetConfig:
 
     @property
     def dataset_dir(self) -> str:
+        override = getattr(self, "dataset_dir_override", None)
+        if override is not None:
+            return override
         return os.path.join(self.project_root, "dataset")
 
     @property

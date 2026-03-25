@@ -111,7 +111,8 @@ def plot_force_vs_time(
         ax.tick_params(labelsize=7)
         ax.grid(True, alpha=0.25)
 
-        outcome = "SUCCESS" if success else "FAIL"
+        is_angular_jam = bool(meta.get("angular_jam", False))
+        outcome = "SUCCESS" if success else ("FAIL JAM" if is_angular_jam else "FAIL")
         difficulty = "HARD" if is_hard else "easy"
 
         # Build depth + XY string (only present in episodes generated after this change)

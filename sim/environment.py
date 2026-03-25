@@ -262,7 +262,9 @@ class PegInsertionEnv:
             physicsClientId=self.physics_client,
         )
 
-        # child_frame_position places the peg's top at the EE origin
+        # Peg rigidly attached to EE. Keep maxForce high so that when the peg
+        # jams against the bore wall, the whole assembly stops; if maxForce is
+        # low the constraint "breaks" and the EE keeps descending through the peg.
         self.peg_constraint = p.createConstraint(
             self.robot_id, self.ee_link_index,
             self.peg_id, -1,
