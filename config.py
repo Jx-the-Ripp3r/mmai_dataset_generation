@@ -56,8 +56,10 @@ class DatasetConfig:
     cam_far: float = 2.0
 
     # ---- Splits ----
-    num_clean: int = 1000
-    num_noisy: int = 500
+    # Train/eval split: 80% train (70% clean / 30% noisy), 20% eval (100% noisy).
+    # That works out to 44% noisy episodes overall (660/1500 or 44/100 for debug).
+    num_clean: int = 840
+    num_noisy: int = 660
 
     # ---- Success thresholds ----
     success_depth_fraction: float = 0.90
@@ -134,4 +136,4 @@ class DatasetConfig:
 
     @classmethod
     def debug(cls) -> "DatasetConfig":
-        return cls(num_clean=30, num_noisy=10, max_steps=80)
+        return cls(num_clean=56, num_noisy=44, max_steps=80)

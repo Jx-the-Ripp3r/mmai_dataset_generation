@@ -2,10 +2,10 @@
 
 Usage
 -----
-Full dataset (1500 episodes):
+Full dataset (1500 episodes, 840 clean / 660 noisy):
     python generate_dataset.py
 
-Debug run (20 episodes, 50 steps, diagnostics):
+Debug run (100 episodes, 56 clean / 44 noisy, diagnostics):
     python generate_dataset.py --debug
 
 With GUI visualisation:
