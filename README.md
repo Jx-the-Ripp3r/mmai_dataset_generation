@@ -1,6 +1,6 @@
 # data_generation
 
-This repository is dedicated to generating the various datasets needed for the MIT Multimodal AI class **6.S895**, taught by Professor Paul Liang.
+This repository is dedicated to generating the various datasets needed for the MIT Multimodal AI class **6.S985**, taught by Professor Paul Liang.
 
 The data includes RGB, force, and proprioception modalities, based in a simulation environment tuned for aligned representation learning on tasks such as:
 - contact classification
