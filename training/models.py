@@ -44,9 +44,10 @@ class VisionEncoder(nn.Module):
     A separate linear projection maps z_v_repr → z_v_proj (64-d) for use in
     the contrastive alignment loss with z_f_proj.
 
-    All pretrained convolutional layers are frozen; only backbone.fc and proj
-    are trained. This prevents overfitting when contact-labelled windows are
-    scarce relative to the 11M-parameter backbone.
+    Freezing strategy: layer1–layer3 are frozen (low-level ImageNet features).
+    layer4 (last residual block, ~3.7M params) and backbone.fc are trainable at
+    a lower LR set by the optimizer in train.py. proj and all other heads train
+    at the full LR. This balances task-specific adaptation against overfitting.
     """
 
     def __init__(self, repr_dim: int = 128, proj_dim: int = 64):
@@ -56,9 +57,11 @@ class VisionEncoder(nn.Module):
         self.backbone = backbone
         self.proj = nn.Linear(repr_dim, proj_dim)
 
-        # Freeze pretrained conv layers; leave backbone.fc + proj trainable
+        # Freeze everything first, then selectively unfreeze layer4 + fc
         for param in self.backbone.parameters():
             param.requires_grad = False
+        for param in self.backbone.layer4.parameters():
+            param.requires_grad = True
         for param in self.backbone.fc.parameters():
             param.requires_grad = True
 

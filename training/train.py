@@ -72,19 +72,20 @@ def _contrastive_retrieval_acc(
 # ── Single-run training function ──────────────────────────────────────────────
 
 def train_encoder_model(
-    train_loader: DataLoader,
-    val_loader:   DataLoader,
-    lambdas:      Tuple[float, float, float] = (0.1, 1.0, 1.0),
-    lr:           float = 1e-3,
-    weight_decay: float = 1e-3,
-    epochs:       int   = 30,
-    patience:     int   = 7,
-    max_minutes:  float = 30.0,
-    proprio_in_dim: int = 60,
-    temperature:  float = 0.07,
-    save_path:    Optional[str] = None,
-    model_name:   str  = "encoder_model",
-    device:       Optional[torch.device] = None,
+    train_loader:        DataLoader,
+    val_loader:          DataLoader,
+    lambdas:             Tuple[float, float, float] = (0.1, 1.0, 1.0),
+    lr:                  float = 1e-3,
+    weight_decay:        float = 1e-3,
+    backbone_lr_factor:  float = 0.02,
+    epochs:              int   = 30,
+    patience:            int   = 7,
+    max_minutes:         float = 30.0,
+    proprio_in_dim:      int   = 60,
+    temperature:         float = 0.07,
+    save_path:           Optional[str] = None,
+    model_name:          str  = "encoder_model",
+    device:              Optional[torch.device] = None,
 ) -> Dict:
     """Train EncoderTrainingModel for one hyperparameter configuration.
 
@@ -112,9 +113,25 @@ def train_encoder_model(
         temperature=temperature,
     ).to(device)
 
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", patience=6, factor=0.5, min_lr=1e-6
+    # Differential LRs: backbone.layer4 at backbone_lr, everything else at lr
+    backbone_lr = lr * backbone_lr_factor
+    backbone_params = [
+        p for name, p in model.named_parameters()
+        if p.requires_grad and "vision_encoder.backbone.layer4" in name
+    ]
+    head_params = [
+        p for name, p in model.named_parameters()
+        if p.requires_grad and "vision_encoder.backbone.layer4" not in name
+    ]
+    optimizer = optim.AdamW(
+        [
+            {"params": backbone_params, "lr": backbone_lr},
+            {"params": head_params,     "lr": lr},
+        ],
+        weight_decay=weight_decay,
+    )
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=epochs, eta_min=1e-6
     )
 
     use_amp = device.type == "cuda"
@@ -131,7 +148,10 @@ def train_encoder_model(
     n_trainable  = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"\n{'='*60}")
     print(f"  {model_name}")
-    print(f"  λ=({lambdas[0]}, {lambdas[1]}, {lambdas[2]})  lr={lr}  wd={weight_decay}")
+    print(
+        f"  λ=({lambdas[0]}, {lambdas[1]}, {lambdas[2]})  "
+        f"lr={lr} (backbone={backbone_lr:.2e})  wd={weight_decay}"
+    )
     print(f"  {n_params:,} params total  |  {n_trainable:,} trainable  |  device={device}")
     print(f"{'='*60}")
 
@@ -227,7 +247,6 @@ def train_encoder_model(
 
         n_vb = max(n_val_batches, 1)
         avg_val = {k: val_totals[k] / n_vb for k in val_totals}
-        scheduler.step(avg_val["total"])
 
         val_ret_acc = _contrastive_retrieval_acc(model, val_loader, device)
 
@@ -271,6 +290,8 @@ def train_encoder_model(
         else:
             no_improve += 1
 
+        scheduler.step()  # cosine decay — called every epoch regardless of val
+
         if elapsed > max_seconds:
             print(f"  [!] Time limit ({max_minutes:.0f} min) reached at epoch {epoch}. Stopping.")
             break
@@ -310,7 +331,8 @@ def train_encoder_model(
         "peak_mem_mb":      peak_mem_mb,
         "n_params":         n_params,
         "hyperparams":      {
-            "lambdas": lambdas, "lr": lr, "weight_decay": weight_decay,
+            "lambdas": lambdas, "lr": lr, "backbone_lr": backbone_lr,
+            "weight_decay": weight_decay,
         },
         "history":          history,
         "ckpt_path":        ckpt_path,
@@ -338,17 +360,23 @@ SWEEP_2 = [
     {"lambdas": (0.1, 1.0, 2.00), "lr": 5e-4, "wd": 1e-4},
 ]
 
+SWEEP_3 = [
+    {"lambdas": (0.1, 1.0, 1.00), "lr": 5e-4, "wd": 1e-4},
+    {"lambdas": (0.1, 1.0, 0.25), "lr": 5e-4, "wd": 1e-4},
+]
+
 
 def run_lambda_sweep(
-    train_loader:   DataLoader,
-    val_loader:     DataLoader,
-    sweep:          List[Dict] = SWEEP,
-    epochs:         int   = 30,
-    patience:       int   = 10,
-    max_minutes:    float = 30.0,
-    proprio_in_dim: int   = 60,
-    output_dir:     str   = ".",
-    device:         Optional[torch.device] = None,
+    train_loader:        DataLoader,
+    val_loader:          DataLoader,
+    sweep:               List[Dict] = SWEEP,
+    epochs:              int   = 30,
+    patience:            int   = 10,
+    max_minutes:         float = 30.0,
+    backbone_lr_factor:  float = 0.02,
+    proprio_in_dim:      int   = 60,
+    output_dir:          str   = ".",
+    device:              Optional[torch.device] = None,
 ) -> Dict[str, Dict]:
     """Run train_encoder_model for each entry in sweep; return best results.
 
@@ -378,18 +406,19 @@ def run_lambda_sweep(
         ckpt = f"{output_dir}/best_{name}.pt"
 
         metrics = train_encoder_model(
-            train_loader   = train_loader,
-            val_loader     = val_loader,
-            lambdas        = lambdas,
-            lr             = lr,
-            weight_decay   = wd,
-            epochs         = epochs,
-            patience       = patience,
-            max_minutes    = max_minutes,
-            proprio_in_dim = proprio_in_dim,
-            save_path      = ckpt,
-            model_name     = name,
-            device         = device,
+            train_loader        = train_loader,
+            val_loader          = val_loader,
+            lambdas             = lambdas,
+            lr                  = lr,
+            weight_decay        = wd,
+            backbone_lr_factor  = backbone_lr_factor,
+            epochs              = epochs,
+            patience            = patience,
+            max_minutes         = max_minutes,
+            proprio_in_dim      = proprio_in_dim,
+            save_path           = ckpt,
+            model_name          = name,
+            device              = device,
         )
         all_results[name] = metrics
 
