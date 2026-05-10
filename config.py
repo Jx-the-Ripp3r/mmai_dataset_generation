@@ -38,6 +38,7 @@ class DatasetConfig:
     max_steps: int = 80
     substeps_per_step: int = 40
     save_rgb_every: int = 5
+    window_size: int = 5  # must be a multiple of save_rgb_every
     sim_timestep: float = 1.0 / 240.0
 
     # ---- Controller ----

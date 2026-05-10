@@ -11,8 +11,9 @@ def save_episode(
     base_dir: str,
     episode_id: int,
     rgb_frames: list[np.ndarray],
-    proprio: np.ndarray,
-    force: np.ndarray,
+    proprio_windows: np.ndarray,
+    force_directions: np.ndarray,
+    c_windows: np.ndarray,
     metadata: dict,
 ) -> None:
     """Persist one episode to disk.
@@ -20,10 +21,14 @@ def save_episode(
     Layout::
 
         base_dir/episode_XXXX/
-            rgb/frame_000.png  …  frame_015.png
-            proprio.npy   [T, 12]
-            force.npy     [T, 6]
+            rgb/frame_000.png  …  frame_N-1.png  (one per window, end-of-window)
+            proprio_windows.npy   [N, k, proprio_dim]  float32
+            force_directions.npy  [N, 3]               float32
+            c_windows.npy         [N,]                 int8
             metadata.json
+
+    frame_i corresponds to window i: the image is captured at the last
+    step of each k-step window, after the force/proprio data in that window.
     """
     ep_dir = os.path.join(base_dir, f"episode_{episode_id:04d}")
     rgb_dir = os.path.join(ep_dir, "rgb")
@@ -33,8 +38,12 @@ def save_episode(
         path = os.path.join(rgb_dir, f"frame_{i:03d}.png")
         cv2.imwrite(path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
 
-    np.save(os.path.join(ep_dir, "proprio.npy"), proprio.astype(np.float32))
-    np.save(os.path.join(ep_dir, "force.npy"), force.astype(np.float32))
+    np.save(os.path.join(ep_dir, "proprio_windows.npy"),
+            proprio_windows.astype(np.float32))
+    np.save(os.path.join(ep_dir, "force_directions.npy"),
+            force_directions.astype(np.float32))
+    np.save(os.path.join(ep_dir, "c_windows.npy"),
+            c_windows.astype(np.int8))
 
     with open(os.path.join(ep_dir, "metadata.json"), "w") as f:
         json.dump(metadata, f, indent=2)
@@ -42,8 +51,9 @@ def save_episode(
 
 def load_episode(ep_dir: str) -> dict:
     """Load an episode directory back into memory."""
-    proprio = np.load(os.path.join(ep_dir, "proprio.npy"))
-    force = np.load(os.path.join(ep_dir, "force.npy"))
+    proprio_windows = np.load(os.path.join(ep_dir, "proprio_windows.npy"))
+    force_directions = np.load(os.path.join(ep_dir, "force_directions.npy"))
+    c_windows = np.load(os.path.join(ep_dir, "c_windows.npy"))
 
     with open(os.path.join(ep_dir, "metadata.json")) as f:
         metadata = json.load(f)
@@ -58,8 +68,9 @@ def load_episode(ep_dir: str) -> dict:
     ]
 
     return {
-        "proprio": proprio,
-        "force": force,
+        "proprio_windows": proprio_windows,
+        "force_directions": force_directions,
+        "c_windows": c_windows,
         "metadata": metadata,
         "rgb": rgb_frames,
     }

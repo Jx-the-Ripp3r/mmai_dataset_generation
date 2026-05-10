@@ -40,6 +40,54 @@ def ensure_assets(cfg: DatasetConfig) -> None:
         setup_all(cfg)
 
 
+def compute_windows(
+    proprio: np.ndarray,
+    force: np.ndarray,
+    cfg: DatasetConfig,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Convert per-step arrays into windowed data points aligned with RGB frames.
+
+    Window w covers steps [w*k, ..., w*k+k-1]. RGB is saved at the last step
+    of each window, so frame_000 corresponds to window 0, frame_001 to window 1,
+    etc.
+
+    Returns:
+        proprio_windows:  (N, k, proprio_dim) float32
+        force_directions: (N, 3)             float32 — fwindow unit vector
+        c_windows:        (N,)               int8    — cwindow 0/1
+    """
+    k = cfg.window_size
+    eps = cfg.contact_force_threshold
+    T = proprio.shape[0]
+    N = T // k
+    proprio_dim = proprio.shape[1]
+
+    proprio_windows = np.zeros((N, k, proprio_dim), dtype=np.float32)
+    force_directions = np.zeros((N, 3), dtype=np.float32)
+    c_windows = np.zeros(N, dtype=np.int8)
+
+    for w in range(N):
+        start = w * k
+        end = start + k
+
+        proprio_windows[w] = proprio[start:end].astype(np.float32)
+
+        fi = force[start:end, :3].astype(np.float32)   # (k, 3) — Fx, Fy, Fz
+        norms = np.linalg.norm(fi, axis=1)              # (k,)
+        ci = (norms > eps).astype(np.float32)           # (k,)
+        c_windows[w] = np.int8(np.max(ci))
+
+        safe_norms = np.where(norms > eps, norms, 1.0)
+        f_hat = np.where(ci[:, None] > 0, fi / safe_norms[:, None], 0.0)
+
+        fsum = np.sum(ci[:, None] * f_hat, axis=0)     # (3,)
+        fsum_norm = np.linalg.norm(fsum)
+        if fsum_norm > 0:
+            force_directions[w] = fsum / fsum_norm
+
+    return proprio_windows, force_directions, c_windows
+
+
 def run_episode(
     env: PegInsertionEnv,
     controller: SimpleDownwardController,
@@ -83,8 +131,8 @@ def run_episode(
             ft = apply_force_noise(ft, cfg)
         force[step] = ft
 
-        # RGB (every N steps)
-        if step % cfg.save_rgb_every == 0:
+        # RGB at end of each window (captures state after force events)
+        if (step + 1) % cfg.save_rgb_every == 0:
             rgb = env.get_rgb()
             if is_noisy:
                 rgb = apply_image_noise(rgb, cfg)
@@ -173,6 +221,12 @@ def main() -> None:
             and num_steps < cfg.max_steps
         )
 
+        # --- compute windowed data points ---
+        proprio_windows, force_directions, c_windows = compute_windows(
+            proprio, force_data, cfg
+        )
+        n_windows = proprio_windows.shape[0]
+
         # --- compute per-episode stats ---
         force_mag = np.linalg.norm(force_data[:, :3], axis=1)
         contact_ratio = float(np.mean(force_mag > cfg.contact_force_threshold))
@@ -211,10 +265,14 @@ def main() -> None:
             "angular_jam": angular_jam,
             "max_contact_force": max_force,
             "contact_ratio": contact_ratio,
+            "n_windows": n_windows,
+            "window_size": cfg.window_size,
         }
 
-        save_episode(cfg.dataset_dir, episode_id, rgb_frames,
-                     proprio, force_data, metadata)
+        save_episode(
+            cfg.dataset_dir, episode_id, rgb_frames,
+            proprio_windows, force_directions, c_windows, metadata,
+        )
 
     elapsed = time.time() - t0
     print(f"\nGenerated {total} episodes in {elapsed:.1f}s "
