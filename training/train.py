@@ -107,7 +107,7 @@ def train_encoder_model(
 
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", patience=3, factor=0.5, min_lr=1e-6
+        optimizer, mode="min", patience=6, factor=0.5, min_lr=1e-6
     )
 
     use_amp = device.type == "cuda"
@@ -294,13 +294,25 @@ SWEEP = [
     {"lambdas": (0.1, 1.0, 0.5), "lr": 5e-4,  "wd": 1e-4},
 ]
 
+# ── Sweep 2: fix λ1:λ2 = 1:10, explore λ2:λ3 ratio at fixed lr/wd ────────────
+# Motivation: SWEEP confirmed λ1=0.1, lr=5e-4, wd=1e-4 as the stable base.
+# λ3 is varied across {0.25, 0.5, 1.0, 2.0} to map the λ2:λ3 trade-off.
+# Use ret_acc (not val_loss) to compare runs — val_loss is λ-scaled and
+# misleading for cross-run comparison when λ3 differs.
+SWEEP_2 = [
+    {"lambdas": (0.1, 1.0, 0.25), "lr": 5e-4, "wd": 1e-4},
+    {"lambdas": (0.1, 1.0, 0.50), "lr": 5e-4, "wd": 1e-4},
+    {"lambdas": (0.1, 1.0, 1.00), "lr": 5e-4, "wd": 1e-4},
+    {"lambdas": (0.1, 1.0, 2.00), "lr": 5e-4, "wd": 1e-4},
+]
+
 
 def run_lambda_sweep(
     train_loader:   DataLoader,
     val_loader:     DataLoader,
     sweep:          List[Dict] = SWEEP,
     epochs:         int   = 30,
-    patience:       int   = 7,
+    patience:       int   = 10,
     max_minutes:    float = 30.0,
     proprio_in_dim: int   = 60,
     output_dir:     str   = ".",
