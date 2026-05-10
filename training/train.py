@@ -127,11 +127,12 @@ def train_encoder_model(
             tracemalloc.stop()
         tracemalloc.start()
 
-    n_params = sum(p.numel() for p in model.parameters())
+    n_params     = sum(p.numel() for p in model.parameters())
+    n_trainable  = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"\n{'='*60}")
     print(f"  {model_name}")
     print(f"  λ=({lambdas[0]}, {lambdas[1]}, {lambdas[2]})  lr={lr}  wd={weight_decay}")
-    print(f"  {n_params:,} params  |  device={device}")
+    print(f"  {n_params:,} params total  |  {n_trainable:,} trainable  |  device={device}")
     print(f"{'='*60}")
 
     best_val_loss    = float("inf")

@@ -58,9 +58,16 @@ def build_loaders(
     train_ds = WindowedRoboticsDataset(train_eps, stats)
     val_ds   = WindowedRoboticsDataset(val_eps,   stats)
 
+    eval_ds = WindowedRoboticsDataset(eval_eps, stats)
     print(
         f"\nDataset sizes:  train={len(train_ds)} windows  "
-        f"val={len(val_ds)} windows  eval(unused)={len(WindowedRoboticsDataset(eval_eps, stats))}"
+        f"val={len(val_ds)} windows  eval(unused)={len(eval_ds)}"
+    )
+    print(
+        f"Contact windows: train={train_ds.n_contact} "
+        f"({100*train_ds.n_contact/max(len(train_ds),1):.1f}%)  "
+        f"val={val_ds.n_contact} "
+        f"({100*val_ds.n_contact/max(len(val_ds),1):.1f}%)"
     )
 
     # num_workers=0 for Windows / Colab compatibility; pin_memory only on CUDA

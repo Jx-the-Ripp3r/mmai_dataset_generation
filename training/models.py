@@ -43,6 +43,10 @@ class VisionEncoder(nn.Module):
     The ResNet18 fc is replaced with a Linear(512, 128) to produce z_v_repr.
     A separate linear projection maps z_v_repr → z_v_proj (64-d) for use in
     the contrastive alignment loss with z_f_proj.
+
+    All pretrained convolutional layers are frozen; only backbone.fc and proj
+    are trained. This prevents overfitting when contact-labelled windows are
+    scarce relative to the 11M-parameter backbone.
     """
 
     def __init__(self, repr_dim: int = 128, proj_dim: int = 64):
@@ -51,6 +55,12 @@ class VisionEncoder(nn.Module):
         backbone.fc = nn.Linear(512, repr_dim)
         self.backbone = backbone
         self.proj = nn.Linear(repr_dim, proj_dim)
+
+        # Freeze pretrained conv layers; leave backbone.fc + proj trainable
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+        for param in self.backbone.fc.parameters():
+            param.requires_grad = True
 
     def forward(self, x: torch.Tensor):
         """x: (B, 3, H, W)  →  z_repr (B, 128), z_proj (B, 64)"""

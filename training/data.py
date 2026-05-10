@@ -142,7 +142,9 @@ def split_episodes(
         f"  Train : {len(train_eps)} eps "
         f"({sum(not e['is_noisy'] for e in train_eps)} clean, "
         f"{sum(e['is_noisy'] for e in train_eps)} noisy)\n"
-        f"  Val   : {len(val_eps)} eps\n"
+        f"  Val   : {len(val_eps)} eps "
+        f"({sum(not e['is_noisy'] for e in val_eps)} clean, "
+        f"{sum(e['is_noisy'] for e in val_eps)} noisy)\n"
         f"  Eval  : {len(eval_eps)} eps (100% noisy)"
     )
     return train_eps, val_eps, eval_eps
@@ -162,6 +164,7 @@ class WindowedRoboticsDataset(Dataset):
 
     def __init__(self, episodes: List[Dict], stats: Dict[str, np.ndarray]):
         self._records: list = []  # (frame_path, proprio_flat, f_window, c_window)
+        self.n_contact: int = 0   # number of contact-gated windows in this split
 
         mean_p = stats["mean_p"]  # (12,)
         std_p  = stats["std_p"]   # (12,)
@@ -179,12 +182,14 @@ class WindowedRoboticsDataset(Dataset):
 
             for w in range(N):
                 frame_path = os.path.join(ep["rgb_dir"], f"frame_{w:03d}.png")
+                c = int(cw[w])
                 self._records.append((
                     frame_path,
                     pw_flat[w].copy(),   # (60,)
                     fd[w].copy(),        # (3,)
-                    int(cw[w]),
+                    c,
                 ))
+                self.n_contact += c
 
     def __len__(self) -> int:
         return len(self._records)
