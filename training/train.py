@@ -4,9 +4,12 @@ Adapted from train_fusion_model / run_all_fusions in mmai_hw2_edward_rivera.py,
 updated for the self-supervised combined loss (contrastive + MSE regression)
 with c_window gating.
 
-Validation metric: mean total loss over the val set (lower is better).
-Sanity check: contrastive top-1 retrieval accuracy on contact-only val samples
-(tells us whether z_v_proj and z_f_proj are aligning).
+Two checkpoints are saved per run:
+  *_mse.pt  — best raw val_mse_vp  (primary: regression quality, λ-independent)
+  *.pt      — best total val_loss   (used only for early stopping signal)
+
+Sweep winner selection uses best_val_mse_vp so cross-run comparison is
+λ-independent. ret_acc is logged as a contrastive alignment sanity check only.
 """
 
 import time
@@ -88,9 +91,13 @@ def train_encoder_model(
     Returns
     -------
     dict with keys:
-        best_val_loss    : float
-        best_val_ret_acc : float   (contrastive retrieval accuracy at best epoch)
-        best_epoch       : int
+        best_val_mse_vp  : float  (primary — raw val mse_vp at best mse_vp epoch)
+        best_val_mse_v   : float  (raw val mse_v at best mse_vp epoch)
+        best_mse_epoch   : int
+        mse_ckpt_path    : str    (checkpoint saved at best mse_vp epoch)
+        best_val_loss    : float  (total val loss; drives early stopping)
+        best_val_ret_acc : float  (ret_acc at best val_loss epoch)
+        best_epoch       : int    (epoch of best val_loss)
         train_time_s     : float
         peak_mem_mb      : float
         n_params         : int
@@ -131,12 +138,18 @@ def train_encoder_model(
     best_val_ret_acc = 0.0
     best_epoch       = 0
     no_improve       = 0
+
+    best_val_mse_vp  = float("inf")
+    best_val_mse_v   = float("inf")
+    best_mse_epoch   = 0
+
     start_time       = time.time()
     best_time_s      = 0.0
     max_seconds      = max_minutes * 60
     history: List[Dict] = []
 
-    ckpt_path = save_path or f"best_{model_name}.pt"
+    ckpt_path     = save_path or f"best_{model_name}.pt"
+    mse_ckpt_path = ckpt_path.replace(".pt", "_mse.pt")
 
     for epoch in range(1, epochs + 1):
         # ── Training ──────────────────────────────────────────────────────────
@@ -225,6 +238,8 @@ def train_encoder_model(
             f"mse_v={avg_train['l_mse_v']:.4f} "
             f"mse_vp={avg_train['l_mse_vp']:.4f}) | "
             f"val_loss={avg_val['total']:.4f} "
+            f"(mse_v={avg_val['l_mse_v']:.4f} "
+            f"mse_vp={avg_val['l_mse_vp']:.4f}) "
             f"ret_acc={val_ret_acc:.3f}"
         )
 
@@ -237,6 +252,14 @@ def train_encoder_model(
         }
         history.append(row)
 
+        # ── Primary checkpoint: best raw val_mse_vp (λ-independent) ──────────
+        if avg_val["l_mse_vp"] < best_val_mse_vp:
+            best_val_mse_vp = avg_val["l_mse_vp"]
+            best_val_mse_v  = avg_val["l_mse_v"]
+            best_mse_epoch  = epoch
+            torch.save(model.state_dict(), mse_ckpt_path)
+
+        # ── Early-stopping checkpoint: best total val_loss ─────────────────
         if avg_val["total"] < best_val_loss:
             best_val_loss    = avg_val["total"]
             best_val_ret_acc = val_ret_acc
@@ -263,13 +286,22 @@ def train_encoder_model(
         peak_mem_mb = peak / 1024**2
 
     print(
-        f"\n  Best val loss: {best_val_loss:.4f}  |  "
+        f"\n  Best mse_vp:  {best_val_mse_vp:.4f}  |  "
+        f"mse_v: {best_val_mse_v:.4f}  |  "
+        f"epoch: {best_mse_epoch}  →  {mse_ckpt_path}"
+    )
+    print(
+        f"  Best val_loss: {best_val_loss:.4f}  |  "
         f"ret_acc: {best_val_ret_acc:.3f}  |  "
         f"epoch: {best_epoch}  |  {best_time_s:.1f}s  |  "
         f"peak mem: {peak_mem_mb:.1f} MB"
     )
 
     return {
+        "best_val_mse_vp":  best_val_mse_vp,
+        "best_val_mse_v":   best_val_mse_v,
+        "best_mse_epoch":   best_mse_epoch,
+        "mse_ckpt_path":    mse_ckpt_path,
         "best_val_loss":    best_val_loss,
         "best_val_ret_acc": best_val_ret_acc,
         "best_epoch":       best_epoch,
@@ -297,8 +329,7 @@ SWEEP = [
 # ── Sweep 2: fix λ1:λ2 = 1:10, explore λ2:λ3 ratio at fixed lr/wd ────────────
 # Motivation: SWEEP confirmed λ1=0.1, lr=5e-4, wd=1e-4 as the stable base.
 # λ3 is varied across {0.25, 0.5, 1.0, 2.0} to map the λ2:λ3 trade-off.
-# Use ret_acc (not val_loss) to compare runs — val_loss is λ-scaled and
-# misleading for cross-run comparison when λ3 differs.
+# Winner selected by best_val_mse_vp (λ-independent regression quality).
 SWEEP_2 = [
     {"lambdas": (0.1, 1.0, 0.25), "lr": 5e-4, "wd": 1e-4},
     {"lambdas": (0.1, 1.0, 0.50), "lr": 5e-4, "wd": 1e-4},
@@ -320,7 +351,8 @@ def run_lambda_sweep(
 ) -> Dict[str, Dict]:
     """Run train_encoder_model for each entry in sweep; return best results.
 
-    Selection criterion: lowest val total loss.
+    Selection criterion: lowest raw val_mse_vp (λ-independent regression quality).
+    ret_acc is shown as a contrastive alignment sanity check only.
 
     Returns
     -------
@@ -331,8 +363,8 @@ def run_lambda_sweep(
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     all_results: Dict[str, Dict] = {}
-    best_run_name  = None
-    best_val_loss  = float("inf")
+    best_run_name   = None
+    best_mse_vp     = float("inf")
 
     for i, hp in enumerate(sweep):
         lambdas = hp["lambdas"]
@@ -360,29 +392,31 @@ def run_lambda_sweep(
         )
         all_results[name] = metrics
 
-        if metrics["best_val_loss"] < best_val_loss:
-            best_val_loss = metrics["best_val_loss"]
+        if metrics["best_val_mse_vp"] < best_mse_vp:
+            best_mse_vp   = metrics["best_val_mse_vp"]
             best_run_name = name
 
     # ── Summary table ──────────────────────────────────────────────────────────
     col_w = 52
-    print(f"\n{'='*90}")
+    print(f"\n{'='*100}")
     print(
-        f"{'Run':<{col_w}} {'BestValLoss':>12} {'RetAcc':>7} "
-        f"{'Epoch':>6} {'Time(s)':>8} {'Params':>10}"
+        f"{'Run':<{col_w}} {'MseVp':>8} {'MseV':>8} {'MseEp':>6} "
+        f"{'ValLoss':>9} {'RetAcc':>7} {'Time(s)':>8} {'Params':>10}"
     )
-    print(f"{'-'*90}")
+    print(f"{'-'*100}")
     for name, res in all_results.items():
         marker = " *" if name == best_run_name else ""
         print(
             f"{name + marker:<{col_w}} "
-            f"{res['best_val_loss']:>12.4f} "
+            f"{res['best_val_mse_vp']:>8.4f} "
+            f"{res['best_val_mse_v']:>8.4f} "
+            f"{res['best_mse_epoch']:>6d} "
+            f"{res['best_val_loss']:>9.4f} "
             f"{res['best_val_ret_acc']:>7.3f} "
-            f"{res['best_epoch']:>6d} "
             f"{res['train_time_s']:>8.1f} "
             f"{res['n_params']:>10,}"
         )
-    print(f"{'='*90}")
-    print(f"Best run: {best_run_name}  (val_loss={best_val_loss:.4f})")
+    print(f"{'='*100}")
+    print(f"Best run: {best_run_name}  (val_mse_vp={best_mse_vp:.4f})")
 
     return all_results
