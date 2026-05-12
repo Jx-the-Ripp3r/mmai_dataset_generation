@@ -1,14 +1,21 @@
 """Generate a series of noisy evaluation splits for probe degradation curves.
 
 Each split ("level") runs the full PyBullet simulation with noise parameters
-scaled by a configurable multiplier ``m``.  The baseline defaults in
-``config.py`` correspond to ``m = 1.0``.
+scaled per a configurable multiplier ``m``.
+
+Per-parameter linear scheduling (NOT uniform multiplication)
+------------------------------------------------------------
+Each noise parameter has its own ``(value_at_m1, value_at_m10)`` schedule and
+is linearly interpolated for arbitrary ``m``.  Force noise is fixed at 0 —
+force readings drive the contact LABEL (``|F| > contact_force_threshold``) and
+provide the force-direction supervision used during encoder training; adding
+noise corrupts the labels themselves rather than the observations.
 
 Layout written to disk::
 
     <output>/
-        level_1.0/episode_0000/ ...
-        level_2.0/episode_0000/ ...
+        level_1/episode_0000/ ...
+        level_2/episode_0000/ ...
         ...
 
 Usage
@@ -29,8 +36,11 @@ Integer or float multipliers are both accepted:
 
 import argparse
 import copy
+import glob
+import json
 import os
 import sys
+from typing import Dict, List
 
 import numpy as np
 
@@ -40,29 +50,101 @@ from sim.controller import SimpleDownwardController
 from sim.environment import PegInsertionEnv
 
 
-def _scale_noise_config(base_cfg: DatasetConfig, multiplier: float) -> DatasetConfig:
-    """Return a *new* DatasetConfig with all noise parameters scaled by ``multiplier``.
+# ── Per-parameter noise schedule ──────────────────────────────────────────────
+# Each entry is (value_at_m1, value_at_m10). Linear interpolation in m. Values
+# outside [1, 10] extrapolate linearly. Force noise is intentionally absent —
+# it is held at 0 because corrupting force corrupts the contact label itself.
+NOISE_SCHEDULE: Dict[str, tuple] = {
+    "image_noise_sigma_lo":  (5.0,    25.0),
+    "image_noise_sigma_hi":  (25.0,   50.0),
+    "light_direction_range": (0.20,   2.00),
+    "light_color_jitter":    (0.05,   0.50),
+    "joint_pos_noise_sigma": (0.001,  0.005),
+    "joint_vel_noise_sigma": (0.005,  0.025),
+}
 
-    Only noisy parameters are touched; geometry, robot, and camera settings are
-    identical to ``base_cfg``.  ``num_clean`` is set to 0 so that every episode
-    receives noise injection.
+
+def _interp(low: float, high: float, m: float) -> float:
+    """Linear interpolation: m=1 → low, m=10 → high. Clipped at 0 below."""
+    t = (m - 1.0) / 9.0
+    return max(0.0, low + t * (high - low))
+
+
+def _scale_noise_config(base_cfg: DatasetConfig, m: float) -> DatasetConfig:
+    """Return a *new* DatasetConfig with noise parameters set for level ``m``.
+
+    Each parameter is interpolated per its own schedule (see NOISE_SCHEDULE).
+    Force noise is fixed at 0 so the contact label / force-direction targets
+    remain ground-truth across all levels.  All episodes are flagged noisy.
     """
     cfg = copy.deepcopy(base_cfg)
 
-    # Scale image noise range at both ends
-    lo, hi = base_cfg.image_noise_sigma_range
-    cfg.image_noise_sigma_range = (lo * multiplier, hi * multiplier)
+    img_lo = _interp(*NOISE_SCHEDULE["image_noise_sigma_lo"],  m)
+    img_hi = _interp(*NOISE_SCHEDULE["image_noise_sigma_hi"],  m)
+    cfg.image_noise_sigma_range = (img_lo, img_hi)
 
-    cfg.force_noise_sigma      = base_cfg.force_noise_sigma      * multiplier
-    cfg.joint_pos_noise_sigma  = base_cfg.joint_pos_noise_sigma  * multiplier
-    cfg.joint_vel_noise_sigma  = base_cfg.joint_vel_noise_sigma  * multiplier
-    cfg.light_direction_range  = base_cfg.light_direction_range  * multiplier
-    cfg.light_color_jitter     = base_cfg.light_color_jitter     * multiplier
+    cfg.light_direction_range = _interp(*NOISE_SCHEDULE["light_direction_range"], m)
+    cfg.light_color_jitter    = _interp(*NOISE_SCHEDULE["light_color_jitter"],    m)
+    cfg.joint_pos_noise_sigma = _interp(*NOISE_SCHEDULE["joint_pos_noise_sigma"], m)
+    cfg.joint_vel_noise_sigma = _interp(*NOISE_SCHEDULE["joint_vel_noise_sigma"], m)
 
-    # All episodes are noisy (no clean episodes in evaluation splits)
-    cfg.num_clean = 0
+    cfg.force_noise_sigma = 0.0
+    cfg.num_clean         = 0
 
     return cfg
+
+
+# ── Per-level summary stats ───────────────────────────────────────────────────
+
+def _summarize_level(level_dir: str) -> Dict[str, float]:
+    """Compute window-level contact rate and per-episode success rate.
+
+    Reads ``c_windows.npy`` and ``metadata.json`` from each episode directory
+    under ``level_dir``. Window-level contact rate matches what the encoder
+    and probes see; step-level rate is included as a sanity check.
+    """
+    episode_dirs = sorted(glob.glob(os.path.join(level_dir, "episode_*")))
+    n_eps             = 0
+    n_success         = 0
+    n_windows_total   = 0
+    n_contact_windows = 0
+    step_rate_sum     = 0.0
+
+    for ep_dir in episode_dirs:
+        meta_path = os.path.join(ep_dir, "metadata.json")
+        cw_path   = os.path.join(ep_dir, "c_windows.npy")
+        if not (os.path.isfile(meta_path) and os.path.isfile(cw_path)):
+            continue
+        with open(meta_path) as fh:
+            meta = json.load(fh)
+        cw = np.load(cw_path)
+
+        n_eps             += 1
+        n_success         += int(meta.get("success", 0))
+        n_windows_total   += int(cw.shape[0])
+        n_contact_windows += int(cw.sum())
+        step_rate_sum     += float(meta.get("contact_ratio", 0.0))
+
+    return {
+        "n_eps":               n_eps,
+        "n_windows":           n_windows_total,
+        "window_contact_rate": n_contact_windows / max(n_windows_total, 1),
+        "step_contact_rate":   step_rate_sum     / max(n_eps, 1),
+        "success_rate":        n_success         / max(n_eps, 1),
+    }
+
+
+def _print_schedule_for_level(m: float, cfg: DatasetConfig) -> None:
+    """Pretty-print the scaled noise values for visibility."""
+    lo, hi = cfg.image_noise_sigma_range
+    print(
+        f"  image σ ∈ [{lo:.2f}, {hi:.2f}]  "
+        f"light_dir={cfg.light_direction_range:.3f}  "
+        f"light_jit={cfg.light_color_jitter:.3f}\n"
+        f"  joint_pos σ={cfg.joint_pos_noise_sigma:.4f}  "
+        f"joint_vel σ={cfg.joint_vel_noise_sigma:.4f}  "
+        f"force σ={cfg.force_noise_sigma:.2f} (fixed)"
+    )
 
 
 def main() -> None:
@@ -108,6 +190,8 @@ def main() -> None:
     base_cfg = DatasetConfig()
     ensure_assets(base_cfg)
 
+    level_summaries: List[Dict] = []
+
     for m in levels:
         level_dir = os.path.join(args.output, f"level_{m:g}")
         print(f"\n{'='*60}")
@@ -118,21 +202,46 @@ def main() -> None:
         cfg.num_noisy = args.episodes_per_level
         # Inject the output path via the override mechanism in DatasetConfig
         cfg.dataset_dir_override = level_dir  # type: ignore[attr-defined]
-
-        # Seed per-level for reproducibility while keeping levels independent
-        level_seed = args.seed + int(m * 1000)
-        np.random.seed(level_seed)
+        _print_schedule_for_level(m, cfg)
 
         env = PegInsertionEnv(cfg, gui=args.gui)
         cfg.num_joints = env.num_joints
         controller = SimpleDownwardController(env)
 
-        run_dataset(cfg, env, controller)
+        # Per-episode seeding (independent of m) keeps episode N's initial
+        # conditions identical across every level — only the noise SCALE
+        # varies, so the underlying physics rollouts are matched.
+        run_dataset(cfg, env, controller, per_episode_seed_base=args.seed)
 
         env.close()
-        print(f"  Level m={m:g} done — {args.episodes_per_level} episodes in {level_dir}")
 
-    print(f"\nAll {len(levels)} levels generated under '{args.output}'.")
+        stats = _summarize_level(level_dir)
+        stats["m"] = m
+        level_summaries.append(stats)
+        print(
+            f"  Level m={m:g} done — {stats['n_eps']} eps, "
+            f"{stats['n_windows']} windows  |  "
+            f"contact (windows)={100*stats['window_contact_rate']:.1f}%  "
+            f"contact (steps)={100*stats['step_contact_rate']:.1f}%  "
+            f"success={100*stats['success_rate']:.1f}%"
+        )
+
+    # ── Final summary table ──────────────────────────────────────────────────
+    print(f"\n{'='*72}")
+    print(
+        f"  {'m':>5}  {'eps':>6}  {'windows':>8}  "
+        f"{'win_contact%':>13}  {'step_contact%':>14}  {'success%':>9}"
+    )
+    print(f"  {'-'*70}")
+    for s in level_summaries:
+        print(
+            f"  {s['m']:>5g}  {s['n_eps']:>6d}  {s['n_windows']:>8d}  "
+            f"{100*s['window_contact_rate']:>12.1f}%  "
+            f"{100*s['step_contact_rate']:>13.1f}%  "
+            f"{100*s['success_rate']:>8.1f}%"
+        )
+    print(f"{'='*72}")
+    print(f"All {len(levels)} levels generated under '{args.output}'.")
 
 
 if __name__ == "__main__":

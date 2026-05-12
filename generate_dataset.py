@@ -16,6 +16,7 @@ import argparse
 import os
 import sys
 import time
+from typing import Optional
 
 import numpy as np
 from tqdm import tqdm
@@ -169,7 +170,8 @@ def run_dataset(
     cfg: DatasetConfig,
     env: PegInsertionEnv,
     controller,
-    episode_id_offset: int = 0,
+    episode_id_offset:     int = 0,
+    per_episode_seed_base: Optional[int] = None,
 ) -> None:
     """Generate all episodes defined by ``cfg`` into ``cfg.dataset_dir``.
 
@@ -187,6 +189,13 @@ def run_dataset(
     episode_id_offset
         Episode IDs written to disk start at this value.  Useful when
         appending to a partially-generated directory.
+    per_episode_seed_base
+        If not None, ``np.random.seed(per_episode_seed_base + local_id)`` is
+        called at the start of each episode.  This makes episode N's initial
+        conditions (peg/hole offsets, target depth, is_hard flag) reproducible
+        and identical across multiple runs that share the same base — useful
+        for noise-sweep evaluation where only the noise scale should differ
+        between runs, not the underlying physics rollouts.
     """
     os.makedirs(cfg.dataset_dir, exist_ok=True)
 
@@ -194,6 +203,8 @@ def run_dataset(
     t0 = time.time()
 
     for local_id in tqdm(range(total), desc="episodes", file=sys.stdout):
+        if per_episode_seed_base is not None:
+            np.random.seed(per_episode_seed_base + local_id)
         episode_id = local_id + episode_id_offset
         is_noisy = local_id >= cfg.num_clean
         is_hard = np.random.random() < cfg.hard_episode_fraction
