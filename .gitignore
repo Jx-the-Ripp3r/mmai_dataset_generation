@@ -6,3 +6,4 @@ dataset/
 diagnostics/
 force-time-dataset-train/
 force-time-dataset-test/
+dataset_noise_sweep/

@@ -165,6 +165,114 @@ def run_episode(
     return rgb_frames, proprio, force, success
 
 
+def run_dataset(
+    cfg: DatasetConfig,
+    env: PegInsertionEnv,
+    controller,
+    episode_id_offset: int = 0,
+) -> None:
+    """Generate all episodes defined by ``cfg`` into ``cfg.dataset_dir``.
+
+    Parameters
+    ----------
+    cfg
+        Fully-configured dataset config.  ``cfg.dataset_dir`` is the write
+        target; ``cfg.num_clean`` / ``cfg.num_noisy`` control how many episodes
+        are generated and which ones receive noise injection.
+    env
+        Pre-constructed simulation environment (already has ``num_joints``
+        attribute set by the caller).
+    controller
+        SimpleDownwardController bound to ``env``.
+    episode_id_offset
+        Episode IDs written to disk start at this value.  Useful when
+        appending to a partially-generated directory.
+    """
+    os.makedirs(cfg.dataset_dir, exist_ok=True)
+
+    total = cfg.total_episodes
+    t0 = time.time()
+
+    for local_id in tqdm(range(total), desc="episodes", file=sys.stdout):
+        episode_id = local_id + episode_id_offset
+        is_noisy = local_id >= cfg.num_clean
+        is_hard = np.random.random() < cfg.hard_episode_fraction
+
+        xy_range  = cfg.peg_xy_offset_range_hard if is_hard else cfg.peg_xy_offset_range
+        rot_range = cfg.peg_rotation_range_deg_hard if is_hard else cfg.peg_rotation_range_deg
+
+        peg_offset   = np.random.uniform(-xy_range, xy_range, 2)
+        peg_rotation = np.random.uniform(-rot_range, rot_range, 2)
+        hole_offset  = np.random.uniform(-cfg.hole_xy_offset_range,
+                                          cfg.hole_xy_offset_range, 2)
+        target_depth = np.random.uniform(*cfg.target_depth_range)
+
+        env.reset(peg_offset, peg_rotation, hole_offset, target_depth)
+        controller.reset(env.get_ee_pos())
+        if is_noisy:
+            randomize_lighting(env.physics_client, cfg)
+
+        rgb_frames, proprio, force_data, success = run_episode(
+            env, controller, cfg, is_noisy
+        )
+        num_steps = force_data.shape[0]
+        angular_jam = (
+            getattr(cfg, "angular_jam_early_stop", False)
+            and not success
+            and num_steps < cfg.max_steps
+        )
+
+        proprio_windows, force_directions, c_windows = compute_windows(
+            proprio, force_data, cfg
+        )
+        n_windows = proprio_windows.shape[0]
+
+        force_mag     = np.linalg.norm(force_data[:, :3], axis=1)
+        contact_ratio = float(np.mean(force_mag > cfg.contact_force_threshold))
+        max_force     = float(np.max(force_mag))
+
+        final_peg_tip   = env.get_peg_tip_pos()
+        final_peg_tip_z = float(final_peg_tip[2])
+        bore_bottom_z   = cfg.table_height + cfg.hole_bottom_thickness
+        end_depth_m     = float(cfg.bore_opening_z - final_peg_tip_z)
+        required_depth_m = float(
+            cfg.bore_opening_z
+            - (bore_bottom_z + (1.0 - cfg.success_depth_fraction) * target_depth)
+        )
+        depth_deficit_m = float(required_depth_m - end_depth_m)
+        hole_xy         = env.hole_world_pos[:2]
+        end_xy_dist_m   = float(np.linalg.norm(final_peg_tip[:2] - hole_xy))
+
+        metadata = {
+            "episode_id":        episode_id,
+            "peg_offset":        peg_offset.tolist(),
+            "peg_rotation":      peg_rotation.tolist(),
+            "hole_offset":       hole_offset.tolist(),
+            "target_depth":      float(target_depth),
+            "end_depth_m":       end_depth_m,
+            "required_depth_m":  required_depth_m,
+            "depth_deficit_m":   depth_deficit_m,
+            "end_xy_dist_m":     end_xy_dist_m,
+            "is_noisy":          is_noisy,
+            "is_hard":           is_hard,
+            "success":           int(success),
+            "angular_jam":       angular_jam,
+            "max_contact_force": max_force,
+            "contact_ratio":     contact_ratio,
+            "n_windows":         n_windows,
+            "window_size":       cfg.window_size,
+        }
+
+        save_episode(
+            cfg.dataset_dir, episode_id, rgb_frames,
+            proprio_windows, force_directions, c_windows, metadata,
+        )
+
+    elapsed = time.time() - t0
+    print(f"\nGenerated {total} episodes in {elapsed:.1f}s "
+          f"({elapsed/total:.2f}s / ep)")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Peg-in-hole dataset generation")
     parser.add_argument("--debug", action="store_true",
@@ -180,103 +288,10 @@ def main() -> None:
     ensure_assets(cfg)
 
     env = PegInsertionEnv(cfg, gui=args.gui)
-    # store num_joints on config so run_episode can reference it
     cfg.num_joints = env.num_joints
     controller = SimpleDownwardController(env)
 
-    os.makedirs(cfg.dataset_dir, exist_ok=True)
-
-    total = cfg.total_episodes
-    t0 = time.time()
-
-    for episode_id in tqdm(range(total), desc="episodes", file=sys.stdout):
-        is_noisy = episode_id >= cfg.num_clean
-        is_hard = np.random.random() < cfg.hard_episode_fraction
-
-        # --- sample randomisation parameters ---
-        xy_range = cfg.peg_xy_offset_range_hard if is_hard else cfg.peg_xy_offset_range
-        rot_range = cfg.peg_rotation_range_deg_hard if is_hard else cfg.peg_rotation_range_deg
-
-        peg_offset = np.random.uniform(-xy_range, xy_range, 2)
-        peg_rotation = np.random.uniform(-rot_range, rot_range, 2)
-        hole_offset = np.random.uniform(-cfg.hole_xy_offset_range,
-                                         cfg.hole_xy_offset_range, 2)
-        target_depth = np.random.uniform(*cfg.target_depth_range)
-
-        # --- reset & optionally randomise lighting ---
-        env.reset(peg_offset, peg_rotation, hole_offset, target_depth)
-        controller.reset(env.get_ee_pos())
-        if is_noisy:
-            randomize_lighting(env.physics_client, cfg)
-
-        # --- run episode ---
-        rgb_frames, proprio, force_data, success = run_episode(
-            env, controller, cfg, is_noisy
-        )
-        num_steps = force_data.shape[0]
-        # Early stop with peg at intermediate depth → synthetic angular jam
-        angular_jam = (
-            getattr(cfg, "angular_jam_early_stop", False)
-            and not success
-            and num_steps < cfg.max_steps
-        )
-
-        # --- compute windowed data points ---
-        proprio_windows, force_directions, c_windows = compute_windows(
-            proprio, force_data, cfg
-        )
-        n_windows = proprio_windows.shape[0]
-
-        # --- compute per-episode stats ---
-        force_mag = np.linalg.norm(force_data[:, :3], axis=1)
-        contact_ratio = float(np.mean(force_mag > cfg.contact_force_threshold))
-        max_force = float(np.max(force_mag))
-
-        # --- compute final insertion depth and tip XY error ---
-        final_peg_tip = env.get_peg_tip_pos()
-        final_peg_tip_z = float(final_peg_tip[2])
-        bore_bottom_z = cfg.table_height + cfg.hole_bottom_thickness
-        # Positive = inside the bore; 0 = at bore opening; ~30 mm = at bore floor
-        end_depth_m = float(cfg.bore_opening_z - final_peg_tip_z)
-        # Minimum depth required for the success check (bore_opening - target_z)
-        required_depth_m = float(
-            cfg.bore_opening_z
-            - (bore_bottom_z + (1.0 - cfg.success_depth_fraction) * target_depth)
-        )
-        # Positive deficit = peg fell short of success threshold
-        depth_deficit_m = float(required_depth_m - end_depth_m)
-        # XY distance of peg tip from hole centre at episode end (success needs < 5 mm)
-        hole_xy = env.hole_world_pos[:2]
-        end_xy_dist_m = float(np.linalg.norm(final_peg_tip[:2] - hole_xy))
-
-        metadata = {
-            "episode_id": episode_id,
-            "peg_offset": peg_offset.tolist(),
-            "peg_rotation": peg_rotation.tolist(),
-            "hole_offset": hole_offset.tolist(),
-            "target_depth": float(target_depth),
-            "end_depth_m": end_depth_m,
-            "required_depth_m": required_depth_m,
-            "depth_deficit_m": depth_deficit_m,
-            "end_xy_dist_m": end_xy_dist_m,
-            "is_noisy": is_noisy,
-            "is_hard": is_hard,
-            "success": int(success),
-            "angular_jam": angular_jam,
-            "max_contact_force": max_force,
-            "contact_ratio": contact_ratio,
-            "n_windows": n_windows,
-            "window_size": cfg.window_size,
-        }
-
-        save_episode(
-            cfg.dataset_dir, episode_id, rgb_frames,
-            proprio_windows, force_directions, c_windows, metadata,
-        )
-
-    elapsed = time.time() - t0
-    print(f"\nGenerated {total} episodes in {elapsed:.1f}s "
-          f"({elapsed/total:.2f}s / ep)")
+    run_dataset(cfg, env, controller)
 
     env.close()
 
